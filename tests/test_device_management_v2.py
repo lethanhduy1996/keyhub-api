@@ -289,7 +289,11 @@ class DeviceManagementTest(unittest.TestCase):
                 ask_delete = self.client.post(url, headers=headers, json=callback(
                     74100007, 74123456, 'delete:' + prefix))
                 self.assertEqual(ask_delete.status_code, 200)
-                self.assertIn('Không thể xóa License còn hiệu lực', str(telegram.call_args))
+                self.assertTrue(any(
+                    call.args[0] == 'sendMessage' and
+                    'Không thể xóa License còn hiệu lực' in call.args[1].get('text', '')
+                    for call in telegram.call_args_list
+                ))
                 self.assertEqual(count_keys(), initial_count + 1)
 
                 revoke = self.client.post(url, headers=headers, json=callback(
