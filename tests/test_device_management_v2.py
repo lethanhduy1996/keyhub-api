@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from app.db import SessionLocal
 from app.main import app
 from app.models import Activation, DeviceAuditEvent, DeviceHeartbeat, LicenseKey, User
-from app.security import hash_password, new_license, secret_digest, now_ts
+from app.security import hash_password, license_prefix, new_license, secret_digest, now_ts
 
 
 class DeviceManagementTest(unittest.TestCase):
@@ -52,6 +52,62 @@ class DeviceManagementTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.client_ctx.__exit__(None, None, None)
         TMP.cleanup()
+
+    def test_duyle_prefix_and_existing_iks_keys_both_work(self):
+        import secrets
+
+        prefix, raw = new_license()
+        self.assertTrue(raw.startswith('duyle-' + prefix + '-'))
+        self.assertEqual(license_prefix(raw), prefix)
+        self.assertEqual(license_prefix(raw.replace('duyle-', 'IKS-', 1)), prefix)
+        self.assertIsNone(license_prefix('OTHER-' + prefix + '-not-valid'))
+        self.assertIsNone(license_prefix('duyle-NOT-HEX-at-all'))
+
+        legacy_prefix = secrets.token_hex(6).upper()
+        legacy_key = 'IKS-' + legacy_prefix + '-' + secrets.token_urlsafe(32)
+        with SessionLocal() as db:
+            admin = db.scalar(__import__('sqlalchemy').select(User).where(
+                User.email == 'keyhub-test-user-741@gmail.com'))
+            db.add(LicenseKey(
+                owner_id=admin.id, prefix=legacy_prefix,
+                key_digest=secret_digest(legacy_key),
+                device_limit=1, expires_at=now_ts() + 86400,
+                note='Legacy IKS regression',
+            ))
+            db.commit()
+
+        payload = {'key': legacy_key,
+                   'device_id': '55777777-3333-3333-3333-333333333333',
+                   'label': 'Legacy iPhone'}
+        old_activated = self.client.post('/api/v1/keys/activate-with-key',
+                                         json=payload)
+        self.assertEqual(old_activated.status_code, 200, old_activated.text)
+        self.assertTrue(old_activated.json()['valid'])
+        old_verified = self.client.post('/api/v1/keys/verify',
+                                        json=payload)
+        self.assertEqual(old_verified.status_code, 200, old_verified.text)
+        self.assertTrue(old_verified.json()['valid'])
+
+        # The string prefix itself participates in the secret digest;
+        # changing IKS to duyle cannot validate an older License.
+        tampered = dict(payload, key=legacy_key.replace('IKS-', 'duyle-', 1))
+        not_activated = self.client.post('/api/v1/keys/activate-with-key',
+                                         json=tampered)
+        self.assertEqual(not_activated.status_code, 400)
+        self.assertFalse(self.client.post('/api/v1/keys/verify',
+                                          json=tampered).json()['valid'])
+
+    def test_admin_issue_uses_duyle_prefix(self):
+        resp = self.client.post('/api/v1/keys', headers=self.headers, json={
+            'owner_email': 'keyhub-test-user-741@gmail.com',
+            'expires_days': 1, 'device_limit': 1,
+            'note': 'DUYLE prefix check',
+        })
+        self.assertEqual(resp.status_code, 201, resp.text)
+        self.assertTrue(resp.json()['secret'].startswith(
+            'duyle-' + resp.json()['prefix'] + '-'))
+        self.assertEqual(license_prefix(resp.json()['secret']),
+                         resp.json()['prefix'])
 
     def test_activation_rename_history_and_removal(self):
         payload = {'key': self.raw_license[1],
@@ -270,6 +326,7 @@ class DeviceManagementTest(unittest.TestCase):
                 secret = key_message.splitlines()[2]
                 prefix = license_prefix(secret)
                 self.assertIsNotNone(prefix)
+                self.assertTrue(secret.startswith('duyle-' + prefix + '-'))
                 self.assertIn('protect_content', str(telegram.call_args_list))
                 call_count = telegram.call_count
                 replay = self.client.post(url, headers=headers, json=callback(
