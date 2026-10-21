@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     refresh_token_days: int = Field(default=30, ge=1, le=90)
     allowed_origins: str = ''
 
+    # Optional: Telegram BotFather bot, isolated to private admin chats.
+    telegram_bot_token: str = ''
+    telegram_webhook_secret: str = ''
+    telegram_admin_ids: str = ''
+    telegram_webhook_base_url: str = ''
+    telegram_owner_email: str = ''
+
 
 @lru_cache
 

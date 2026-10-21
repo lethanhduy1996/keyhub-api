@@ -12,6 +12,7 @@ from .models import Activation, APICredential, DeviceAuditEvent, DeviceHeartbeat
 from .schemas import (ActivationOut, DeviceEventOut, RenameDeviceIn, APICredentialOut, APICredentialIssuedOut, CreateAPICredentialIn, IssueKeyIn, KeyActionIn, KeyIssuedOut,
                       KeyOut, LoginIn, MessageOut, RefreshIn, RegisterIn,
                       TokensOut, UserOut, VerifyOut)
+from .telegram_bot import register_webhook, router as telegram_router
 from .security import (api_key_prefix, create_access_token, hash_password, license_prefix,
                        new_api_key, new_license, new_refresh_token, now_ts,
                        parse_access_token, safe_digest_equal, secret_digest,
@@ -24,10 +25,12 @@ http_bearer = HTTPBearer(auto_error=False)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()  # MVP only: introduce Alembic migrations before production upgrades.
+    await register_webhook()
     yield
 
 
 app = FastAPI(title=settings.app_name, version='0.1.0', lifespan=lifespan)
+app.include_router(telegram_router)
 if settings.allowed_origins:
     app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in settings.allowed_origins.split(',')],
                        allow_credentials=False, allow_methods=['GET', 'POST', 'DELETE'], allow_headers=['Authorization', 'Content-Type'])
