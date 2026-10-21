@@ -57,17 +57,41 @@ def datestring(value: int) -> str:
     return datetime.fromtimestamp(value, tz=TZ).strftime('%d/%m/%Y %H:%M')
 
 
+def button_style(callback: str) -> str | None:
+    """Telegram Bot API supports primary/blue, success/green and danger/red.
+
+    Leave neutral navigation buttons unstyled for consistent contrast.
+    Older Telegram clients may ignore styles; emoji labels remain readable.
+    """
+    action = callback.split(':', 1)[0]
+    if action in ('revoke', 'delete', 'askrevoke', 'askdel'):
+        return 'danger'
+    if action in ('periods', 'issue', 'renew'):
+        return 'success'
+    if action in ('list', 'detail', 'period', 'devices', 'askrenew'):
+        return 'primary'
+    return None
+
+
 def keyboard(*rows: tuple[tuple[str, str], ...]) -> dict:
+    def make_button(title: str, value: str) -> dict:
+        item = {'text': title, 'callback_data': value}
+        style = button_style(value)
+        if style:
+            item['style'] = style
+        return item
+
     return {'inline_keyboard': [
-        [{'text': title, 'callback_data': value} for title, value in row]
+        [make_button(title, value) for title, value in row]
         for row in rows
     ]}
 
 
 def home_markup() -> dict:
     return keyboard(
-        (('Tạo License', 'periods'), ('Danh sách', 'list:active')),
-        (('Key hết hạn/thu hồi', 'list:inactive'), ('Trợ giúp', 'help')),
+        (('🟢 Tạo License', 'periods'), ('📋 Key còn hạn', 'list:active')),
+        (('🕒 Hết hạn / thu hồi', 'list:inactive'),),
+        (('ℹ️ Hướng dẫn sử dụng', 'help'),),
     )
 
 
@@ -119,14 +143,14 @@ def key_info(db: Session, item: LicenseKey) -> str:
 def key_actions(item: LicenseKey) -> dict:
     if item.revoked_at is not None or item.expires_at <= now_ts():
         return keyboard(
-            (('Xóa License', f'askdel:{item.prefix}'),),
-            (('Danh sách', 'list:inactive'), ('Trang chính', 'home')),
+            (('🗑 Xóa License', f'askdel:{item.prefix}'),),
+            (('📋 Danh sách', 'list:inactive'), ('🏠 Trang chính', 'home')),
         )
     return keyboard(
-        (('Gia hạn 7 ngày', f'askrenew:{item.prefix}:7'),
-         ('Gia hạn 30 ngày', f'askrenew:{item.prefix}:30')),
-        (('Thu hồi License', f'askrevoke:{item.prefix}'),),
-        (('Danh sách', 'list:active'), ('Trang chính', 'home')),
+        (('➕ Gia hạn 7 ngày', f'askrenew:{item.prefix}:7'),
+         ('➕ Gia hạn 30 ngày', f'askrenew:{item.prefix}:30')),
+        (('⚠️ Thu hồi License', f'askrevoke:{item.prefix}'),),
+        (('📋 Danh sách', 'list:active'), ('🏠 Trang chính', 'home')),
     )
 
 
@@ -146,9 +170,9 @@ def list_keys(db: Session, chat_id: int, inactive: bool = False) -> dict:
     lines = [label + ' (10 Key mới nhất):']
     for item in entries:
         lines.append(f'• {item.prefix}… | {status_of(item)} | {datestring(item.expires_at)}')
-        rows.append(((item.prefix + '…', 'detail:' + item.prefix),))
-    rows.append((('Làm mới', 'list:inactive' if inactive else 'list:active'),))
-    rows.append((('Trang chính', 'home'),))
+        rows.append((('🔎 ' + item.prefix + '…', 'detail:' + item.prefix),))
+    rows.append((('🔄 Làm mới', 'list:inactive' if inactive else 'list:active'),))
+    rows.append((('🏠 Trang chính', 'home'),))
     return send(chat_id, '\n'.join(lines), keyboard(*rows))
 
 
@@ -180,9 +204,10 @@ def process_command(db: Session, chat_id: int, text: str) -> dict:
         )
     if cmd == '/taokey':
         if len(tokens) == 1:
-            return send(chat_id, 'Chọn thời hạn cho License:', keyboard(
-                (('1 ngày', 'period:1'), ('7 ngày', 'period:7'), ('30 ngày', 'period:30')),
-                (('Trang chính', 'home'),),
+            return send(chat_id, '📅 Chọn thời hạn License:', keyboard(
+                (('⚡ 1 ngày', 'period:1'), ('📆 7 ngày', 'period:7')),
+                (('🗓 30 ngày', 'period:30'),),
+                (('⬅️ Trang chính', 'home'),),
             ))
         if len(tokens) != 3 or not all(t.isdecimal() for t in tokens[1:]):
             return send(chat_id, 'Cú pháp: /taokey 30 1 (30 ngày, 1 thiết bị)')
@@ -221,8 +246,8 @@ def prompt_issue(chat_id: int, days: int, device_limit: int) -> dict:
         f'Xác nhận tạo License:\n• Thời hạn: {days} ngày\n'
         f'• Số thiết bị: {device_limit}\n• Chủ sở hữu: {owner_email() or "Chưa cấu hình"}\n'
         'Bạn muốn tạo Key mới?',
-        keyboard((('Xác nhận tạo Key', f'issue:{days}:{device_limit}'),),
-                 (('Hủy', 'home'),)),
+        keyboard((('✅ Xác nhận tạo Key', f'issue:{days}:{device_limit}'),),
+                 (('↩️ Hủy', 'home'),)),
     )
 
 
@@ -236,9 +261,9 @@ def process_callback(db: Session, chat_id: int, data: str) -> dict:
     if action == 'period' and len(parts) == 2 and parts[1].isdecimal():
         days = int(parts[1])
         return send(chat_id, f'Đã chọn {days} ngày. Chọn số lượng thiết bị:',
-                    keyboard((('1 thiết bị', f'devices:{days}:1'),
-                              ('2 thiết bị', f'devices:{days}:2')),
-                             (('Trở lại', 'periods'),)))
+                    keyboard((('📱 1 thiết bị', f'devices:{days}:1'),
+                              ('📱 2 thiết bị', f'devices:{days}:2')),
+                             (('⬅️ Trở lại', 'periods'),)))
     if action == 'devices' and len(parts) == 3 and all(p.isdecimal() for p in parts[1:]):
         return prompt_issue(chat_id, int(parts[1]), int(parts[2]))
     if action == 'issue' and len(parts) == 3 and all(p.isdecimal() for p in parts[1:]):
@@ -288,7 +313,9 @@ def process_callback(db: Session, chat_id: int, data: str) -> dict:
                 return send(chat_id, 'Chỉ xóa được Key hết hạn hoặc đã thu hồi.')
             msg = 'XÓA VĨNH VIỄN Key ' + item.prefix + '…?\nThiết bị và lịch sử bị xóa, KHÔNG thể hoàn tác.'
             callback = 'delete:' + item.prefix
-        return send(chat_id, msg, keyboard((('Đồng ý', callback), ('Hủy', 'home'))))
+        verb = '🗑 Xóa vĩnh viễn' if action == 'askdel' else '⚠️ Xác nhận thu hồi'
+        return send(chat_id, msg, keyboard(((verb, callback),),
+                                           (('↩️ Hủy', 'home'),)))
     if action == 'askrenew' and len(parts) == 3 and parts[2].isdecimal():
         item = find_key(db, parts[1])
         days = int(parts[2])
@@ -299,8 +326,8 @@ def process_callback(db: Session, chat_id: int, data: str) -> dict:
         if not 1 <= days <= 3650:
             return send(chat_id, 'Thời gian gia hạn phải từ 1–3650 ngày.')
         return send(chat_id, f'Xác nhận gia hạn {days} ngày cho {item.prefix}…?',
-                    keyboard((('Đồng ý gia hạn', f'renew:{item.prefix}:{days}'),),
-                             (('Hủy', 'home'),)))
+                    keyboard((('✅ Xác nhận gia hạn', f'renew:{item.prefix}:{days}'),),
+                             (('↩️ Hủy', 'home'),)))
     if action in ('revoke', 'delete', 'renew') and len(parts) in (2, 3):
         item = lock_key(db, parts[1])
         if item is None:
