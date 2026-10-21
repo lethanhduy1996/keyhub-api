@@ -62,6 +62,7 @@ class KeyActionIn(BaseModel):
 class VerifyOut(BaseModel):
     valid: bool
     device_code: str | None = None  # Stable app identifier, not hardware UDID
+    expires_at: int | None = None  # Unix seconds, only returned for valid License
 
 
 class ActivationOut(BaseModel):
