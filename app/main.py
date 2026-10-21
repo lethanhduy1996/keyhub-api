@@ -8,8 +8,8 @@ from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .db import get_db, init_db
-from .models import Activation, APICredential, LicenseKey, RefreshSession, User
-from .schemas import (ActivationOut, APICredentialOut, APICredentialIssuedOut, CreateAPICredentialIn, IssueKeyIn, KeyActionIn, KeyIssuedOut,
+from .models import Activation, APICredential, DeviceAuditEvent, DeviceHeartbeat, LicenseKey, RefreshSession, User
+from .schemas import (ActivationOut, DeviceEventOut, RenameDeviceIn, APICredentialOut, APICredentialIssuedOut, CreateAPICredentialIn, IssueKeyIn, KeyActionIn, KeyIssuedOut,
                       KeyOut, LoginIn, MessageOut, RefreshIn, RegisterIn,
                       TokensOut, UserOut, VerifyOut)
 from .security import (api_key_prefix, create_access_token, hash_password, license_prefix,
@@ -73,6 +73,37 @@ def key_out(key: LicenseKey, db: Session) -> KeyOut:
 def device_alias(device_hash: str) -> str:
     """Pseudonymous administrative identifier; not an Apple hardware UDID."""
     return f'KH-{device_hash[:8].upper()}-{device_hash[8:16].upper()}'
+
+
+
+def record_device_event(db: Session, key_id: str, digest: str, label: str, event_type: str) -> None:
+    db.add(DeviceAuditEvent(key_id=key_id, device_code=device_alias(digest),
+                            label=label[:80], event_type=event_type, created_at=now_ts()))
+
+
+def touch_device_heartbeat(db: Session, key_id: str, digest: str) -> None:
+    """Upsert last successful verification; write at most once per minute."""
+    timestamp = now_ts()
+    values = {'key_id': key_id, 'device_hash': digest, 'last_verified_at': timestamp}
+    dialect = db.get_bind().dialect.name
+    if dialect == 'postgresql':
+        from sqlalchemy.dialects.postgresql import insert as insert_for_dialect
+    elif dialect == 'sqlite':
+        from sqlalchemy.dialects.sqlite import insert as insert_for_dialect
+    else:
+        current = db.get(DeviceHeartbeat, (key_id, digest))
+        if current:
+            if timestamp - current.last_verified_at >= 60:
+                current.last_verified_at = timestamp
+        else:
+            db.add(DeviceHeartbeat(**values))
+        return
+    insert_stmt = insert_for_dialect(DeviceHeartbeat).values(**values)
+    db.execute(insert_stmt.on_conflict_do_update(
+        index_elements=[DeviceHeartbeat.key_id, DeviceHeartbeat.device_hash],
+        set_={'last_verified_at': timestamp},
+        where=DeviceHeartbeat.last_verified_at <= timestamp - 60
+    ))
 
 
 def key_for_secret(raw: str, db: Session, lock: bool = False) -> LicenseKey | None:
@@ -183,6 +214,8 @@ def activate(data: KeyActionIn, user: User = Depends(current_user), db: Session 
         if count >= key.device_limit:
             raise HTTPException(409, 'Device limit reached')
         db.add(Activation(key_id=key.id, device_hash=digest, label=data.label))
+        record_device_event(db, key.id, digest, data.label, 'activated')
+        touch_device_heartbeat(db, key.id, digest)
         db.commit()
     return key_out(key, db)
 
@@ -199,6 +232,11 @@ def activate_with_key(data: KeyActionIn, db: Session = Depends(get_db)):
         if count >= key.device_limit:
             raise HTTPException(409, 'Device limit reached')
         db.add(Activation(key_id=key.id, device_hash=digest, label=data.label))
+        record_device_event(db, key.id, digest, data.label, 'activated')
+        touch_device_heartbeat(db, key.id, digest)
+        db.commit()
+    if existing is not None:
+        touch_device_heartbeat(db, key.id, digest)
         db.commit()
     return VerifyOut(valid=True, device_code=device_alias(digest))
 
@@ -210,10 +248,14 @@ def verify(data: KeyActionIn, db: Session = Depends(get_db)):
     key = key_for_secret(data.key, db)
     if key is None or key.revoked_at is not None or key.expires_at <= now_ts():
         return VerifyOut(valid=False)
+    digest = secret_digest(data.device_id)
     existing = db.scalar(select(Activation.id).where(
-        Activation.key_id == key.id, Activation.device_hash == secret_digest(data.device_id)))
+        Activation.key_id == key.id, Activation.device_hash == digest))
+    if existing is not None:
+        touch_device_heartbeat(db, key.id, digest)
+        db.commit()
     return VerifyOut(valid=existing is not None,
-                     device_code=device_alias(secret_digest(data.device_id)) if existing is not None else None)
+                     device_code=device_alias(digest) if existing is not None else None)
 
 
 @app.get('/api/v1/keys/{key_id}/devices', response_model=list[ActivationOut])
@@ -223,10 +265,55 @@ def list_devices(key_id: str, user: User = Depends(current_user), db: Session = 
         raise HTTPException(404, 'License not found')
     if not user.is_admin and key.owner_id != user.id:
         raise HTTPException(403, 'No access to this license')
+    enrolled = db.scalars(select(Activation).where(Activation.key_id == key.id)
+                          .order_by(Activation.created_at.desc())).all()
+    last_seen = {row.device_hash: row.last_verified_at for row in db.scalars(
+        select(DeviceHeartbeat).where(DeviceHeartbeat.key_id == key.id)).all()}
     return [ActivationOut(id=device.id, label=device.label, created_at=device.created_at,
-                          device_code=device_alias(device.device_hash))
-            for device in db.scalars(select(Activation).where(Activation.key_id == key.id)
-                                     .order_by(Activation.created_at.desc())).all()]
+                          device_code=device_alias(device.device_hash),
+                          last_verified_at=last_seen.get(device.device_hash))
+            for device in enrolled]
+
+
+@app.post('/api/v1/keys/{key_id}/devices/{device_id}/rename', response_model=ActivationOut)
+def rename_device(key_id: str, device_id: str, data: RenameDeviceIn,
+                  admin: User = Depends(admin_user), db: Session = Depends(get_db)):
+    key = db.get(LicenseKey, key_id)
+    if key is None:
+        raise HTTPException(404, 'License not found')
+    device = db.scalar(select(Activation).where(
+        Activation.key_id == key_id, Activation.id == device_id))
+    if device is None:
+        raise HTTPException(404, 'Device not found')
+    new_label = data.label.strip()
+    if not new_label:
+        raise HTTPException(422, 'Device name cannot be blank')
+    if device.label != new_label:
+        device.label = new_label
+        record_device_event(db, key_id, device.device_hash, new_label, 'renamed')
+        db.commit()
+    heartbeat = db.get(DeviceHeartbeat, (key_id, device.device_hash))
+    return ActivationOut(id=device.id, label=device.label,
+                         created_at=device.created_at,
+                         device_code=device_alias(device.device_hash),
+                         last_verified_at=heartbeat.last_verified_at if heartbeat else None)
+
+
+@app.get('/api/v1/keys/{key_id}/devices/history', response_model=list[DeviceEventOut])
+def device_history(key_id: str, limit: int = Query(100, ge=1, le=200),
+                   user: User = Depends(current_user), db: Session = Depends(get_db)):
+    key = db.get(LicenseKey, key_id)
+    if key is None:
+        raise HTTPException(404, 'License not found')
+    if not user.is_admin and key.owner_id != user.id:
+        raise HTTPException(403, 'No access to this license')
+    events = db.scalars(select(DeviceAuditEvent).where(
+        DeviceAuditEvent.key_id == key_id).order_by(
+            DeviceAuditEvent.created_at.desc(),
+            DeviceAuditEvent.id.desc()).limit(limit)).all()
+    return [DeviceEventOut(id=event.id, device_code=event.device_code,
+                           label=event.label, event_type=event.event_type,
+                           created_at=event.created_at) for event in events]
 
 
 @app.delete('/api/v1/keys/{key_id}/devices/{device_id}', response_model=MessageOut)
@@ -239,6 +326,10 @@ def delete_device(key_id: str, device_id: str, user: User = Depends(current_user
     device = db.scalar(select(Activation).where(Activation.key_id == key.id, Activation.id == device_id))
     if device is None:
         raise HTTPException(404, 'Device not found')
+    record_device_event(db, key_id, device.device_hash, device.label, 'removed')
+    heartbeat = db.get(DeviceHeartbeat, (key_id, device.device_hash))
+    if heartbeat is not None:
+        db.delete(heartbeat)
     db.delete(device)
     db.commit()
     return MessageOut(message='Device removed')
