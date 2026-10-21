@@ -285,7 +285,8 @@ def activate_with_key(data: KeyActionIn, db: Session = Depends(get_db)):
     if existing is not None:
         touch_device_heartbeat(db, key.id, digest)
         db.commit()
-    return VerifyOut(valid=True, device_code=device_alias(digest))
+    return VerifyOut(valid=True, device_code=device_alias(digest),
+                     expires_at=key.expires_at)
 
 
 @app.post('/api/v1/keys/verify', response_model=VerifyOut)
@@ -302,7 +303,8 @@ def verify(data: KeyActionIn, db: Session = Depends(get_db)):
         touch_device_heartbeat(db, key.id, digest)
         db.commit()
     return VerifyOut(valid=existing is not None,
-                     device_code=device_alias(digest) if existing is not None else None)
+                     device_code=device_alias(digest) if existing is not None else None,
+                     expires_at=key.expires_at if existing is not None else None)
 
 
 @app.get('/api/v1/keys/{key_id}/devices', response_model=list[ActivationOut])
