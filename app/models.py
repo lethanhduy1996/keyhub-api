@@ -84,6 +84,14 @@ class DeviceAuditEvent(Base):
     created_at: Mapped[int] = mapped_column(default=now_ts, nullable=False)
 
 
+
+class TelegramProcessedUpdate(Base):
+    """Claim processed Telegram update IDs to prevent duplicate licenses on retries."""
+    __tablename__ = 'telegram_processed_updates'
+    update_id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[int] = mapped_column(default=now_ts, nullable=False)
+
+
 class APICredential(Base):
     __tablename__ = 'api_credentials'
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
