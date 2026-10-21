@@ -61,6 +61,7 @@ class KeyActionIn(BaseModel):
 
 class VerifyOut(BaseModel):
     valid: bool
+    device_code: str | None = None  # Stable app identifier, not hardware UDID
 
 
 class ActivationOut(BaseModel):
