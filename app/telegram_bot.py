@@ -352,8 +352,8 @@ async def register_webhook() -> None:
     base = cfg.telegram_webhook_base_url.rstrip('/')
     if not bot_configured() or not base:
         return
-    if not base.startswith('https://') or not cfg.telegram_admin_ids.strip():
-        logger.warning('Telegram webhook skipped: provide HTTPS base URL and admin IDs')
+    if not base.startswith('https://'):
+        logger.warning('Telegram webhook skipped: provide an HTTPS base URL')
         return
     try:
         await telegram_api_call('setWebhook', {
