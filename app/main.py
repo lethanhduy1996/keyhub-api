@@ -182,6 +182,22 @@ def activate(data: KeyActionIn, user: User = Depends(current_user), db: Session 
     return key_out(key, db)
 
 
+@app.post('/api/v1/keys/activate-with-key', response_model=VerifyOut)
+def activate_with_key(data: KeyActionIn, db: Session = Depends(get_db)):
+    key = key_for_secret(data.key, db, lock=True)
+    if key is None or key.revoked_at is not None or key.expires_at <= now_ts() or not key.owner.is_active:
+        raise HTTPException(400, 'License invalid or expired')
+    digest = secret_digest(data.device_id)
+    existing = db.scalar(select(Activation.id).where(Activation.key_id == key.id, Activation.device_hash == digest))
+    if existing is None:
+        count = db.scalar(select(func.count()).select_from(Activation).where(Activation.key_id == key.id)) or 0
+        if count >= key.device_limit:
+            raise HTTPException(409, 'Device limit reached')
+        db.add(Activation(key_id=key.id, device_hash=digest, label=data.label))
+        db.commit()
+    return VerifyOut(valid=True)
+
+
 @app.post('/api/v1/keys/verify', response_model=VerifyOut)
 def verify(data: KeyActionIn, db: Session = Depends(get_db)):
     # Intended for clients that know both license secret and enrolled device UUID.
