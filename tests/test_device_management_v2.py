@@ -191,6 +191,137 @@ class DeviceManagementTest(unittest.TestCase):
                                          headers=self.headers)
         self.assertEqual(cleaned_again.json()['deleted'], 0)
 
+    def test_telegram_bot_authorization_idempotence_and_key_lifecycle(self):
+        from unittest.mock import AsyncMock, patch
+        from app.config import get_settings
+        from app.models import TelegramProcessedUpdate
+        from app.security import license_prefix
+
+        settings = get_settings()
+        originals = {
+            key: getattr(settings, key)
+            for key in ('telegram_bot_token', 'telegram_webhook_secret',
+                        'telegram_admin_ids', 'telegram_owner_email',
+                        'telegram_webhook_base_url')
+        }
+        settings.telegram_bot_token = '123456:fake-test-telegram-token'
+        settings.telegram_webhook_secret = 'webhookSecret12345'
+        settings.telegram_admin_ids = '74123456'
+        settings.telegram_owner_email = 'keyhub-test-user-741@gmail.com'
+        settings.telegram_webhook_base_url = ''
+
+        url = '/api/v1/telegram/webhook'
+        headers = {'X-Telegram-Bot-Api-Secret-Token': settings.telegram_webhook_secret}
+        def message(update_id, telegram_id, text):
+            return {'update_id': update_id, 'message': {
+                'message_id': update_id,
+                'from': {'id': telegram_id},
+                'chat': {'id': telegram_id, 'type': 'private'},
+                'text': text
+            }}
+        def callback(update_id, telegram_id, data):
+            return {'update_id': update_id, 'callback_query': {
+                'id': 'callback' + str(update_id),
+                'from': {'id': telegram_id},
+                'message': {'message_id': update_id,
+                            'chat': {'id': telegram_id, 'type': 'private'}},
+                'data': data
+            }}
+        def count_keys():
+            with SessionLocal() as db:
+                return db.query(LicenseKey).count()
+        try:
+            with patch('app.telegram_bot.telegram_api_call',
+                       new_callable=AsyncMock) as telegram:
+                telegram.return_value = {'ok': True}
+                denied = self.client.post(url, json=message(
+                    74100001, 74123456, '/taokey 30 1'))
+                self.assertEqual(denied.status_code, 403)
+
+                initial_count = count_keys()
+                unauth = self.client.post(url, headers=headers, json=message(
+                    74100002, 74123457, '/taokey 30 1'))
+                self.assertEqual(unauth.status_code, 200, unauth.text)
+                self.assertEqual(count_keys(), initial_count)
+                self.assertIn('74123457', str(telegram.call_args_list))
+
+                # Group/chat spoofing is ignored by the bot.
+                blocked_group = message(74100003, 74123456, '/taokey 30 1')
+                blocked_group['message']['chat'] = {'id': -7412, 'type': 'group'}
+                before_calls = telegram.call_count
+                group = self.client.post(url, headers=headers, json=blocked_group)
+                self.assertEqual(group.status_code, 200)
+                self.assertEqual(telegram.call_count, before_calls)
+
+                prompted = self.client.post(url, headers=headers, json=message(
+                    74100004, 74123456, '/taokey 30 1'))
+                self.assertEqual(prompted.status_code, 200, prompted.text)
+                self.assertEqual(count_keys(), initial_count)
+                self.assertIn('issue:30:1', str(telegram.call_args))
+
+                created = self.client.post(url, headers=headers, json=callback(
+                    74100005, 74123456, 'issue:30:1'))
+                self.assertEqual(created.status_code, 200, created.text)
+                self.assertEqual(count_keys(), initial_count + 1)
+                key_message = next(
+                    entry.args[1]['text'] for entry in reversed(telegram.call_args_list)
+                    if entry.args[0] == 'sendMessage' and 'ĐÃ TẠO LICENSE' in entry.args[1]['text']
+                )
+                secret = key_message.splitlines()[2]
+                prefix = license_prefix(secret)
+                self.assertIsNotNone(prefix)
+                self.assertIn('protect_content', str(telegram.call_args_list))
+                call_count = telegram.call_count
+                replay = self.client.post(url, headers=headers, json=callback(
+                    74100005, 74123456, 'issue:30:1'))
+                self.assertEqual(replay.status_code, 200, replay.text)
+                self.assertEqual(telegram.call_count, call_count)
+                self.assertEqual(count_keys(), initial_count + 1)
+
+                renewed = self.client.post(url, headers=headers, json=callback(
+                    74100006, 74123456, 'renew:' + prefix + ':7'))
+                self.assertEqual(renewed.status_code, 200, renewed.text)
+                with SessionLocal() as db:
+                    item = db.scalar(__import__('sqlalchemy').select(LicenseKey).where(
+                        LicenseKey.prefix == prefix))
+                    self.assertGreater(item.expires_at, now_ts() + 30*86400)
+
+                ask_delete = self.client.post(url, headers=headers, json=callback(
+                    74100007, 74123456, 'delete:' + prefix))
+                self.assertEqual(ask_delete.status_code, 200)
+                self.assertIn('Không thể xóa License còn hiệu lực', str(telegram.call_args))
+                self.assertEqual(count_keys(), initial_count + 1)
+
+                revoke = self.client.post(url, headers=headers, json=callback(
+                    74100008, 74123456, 'revoke:' + prefix))
+                self.assertEqual(revoke.status_code, 200, revoke.text)
+                with SessionLocal() as db:
+                    item = db.scalar(__import__('sqlalchemy').select(LicenseKey).where(
+                        LicenseKey.prefix == prefix))
+                    self.assertIsNotNone(item.revoked_at)
+
+                deleted = self.client.post(url, headers=headers, json=callback(
+                    74100009, 74123456, 'delete:' + prefix))
+                self.assertEqual(deleted.status_code, 200, deleted.text)
+                self.assertEqual(count_keys(), initial_count)
+
+                # Delivery errors rollback the side effect AND the update claim.
+                telegram.side_effect = RuntimeError('Simulated Telegram unavailable')
+                unavailable = self.client.post(url, headers=headers, json=callback(
+                    74100010, 74123456, 'issue:1:1'))
+                self.assertEqual(unavailable.status_code, 502)
+                self.assertEqual(count_keys(), initial_count)
+                with SessionLocal() as db:
+                    self.assertIsNone(db.get(TelegramProcessedUpdate, 74100010))
+                telegram.side_effect = None
+                delivered = self.client.post(url, headers=headers, json=callback(
+                    74100010, 74123456, 'issue:1:1'))
+                self.assertEqual(delivered.status_code, 200, delivered.text)
+                self.assertEqual(count_keys(), initial_count+1)
+        finally:
+            for key, value in originals.items():
+                setattr(settings, key, value)
+
     def test_unauthorized_history_and_rename(self):
         history = self.client.get(f'/api/v1/keys/{self.key_id}/devices/history')
         self.assertEqual(history.status_code, 401)
