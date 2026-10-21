@@ -26,6 +26,10 @@ from .security import new_license, now_ts, secret_digest
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+# HTTPX's default INFO request logging contains Telegram Bot API URLs, which
+# embed the secret Bot Token. Never expose these URLs in Render logs.
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
 TZ = ZoneInfo('Asia/Ho_Chi_Minh')
 HEX_PREFIX = re.compile(r'^[0-9A-Fa-f]{12}$')
 
