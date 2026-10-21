@@ -25,7 +25,7 @@ class DeviceManagementTest(unittest.TestCase):
         cls.client_ctx = TestClient(app)
         cls.client = cls.client_ctx.__enter__()
         with SessionLocal() as db:
-            admin = User(email='admin@example.test',
+            admin = User(email='keyhub-test-user-741@gmail.com',
                          password_hash=hash_password('Secure-Test-Password-12345'),
                          is_admin=True, is_active=True)
             db.add(admin)
@@ -39,7 +39,7 @@ class DeviceManagementTest(unittest.TestCase):
                               note='Regression test'))
             db.commit()
         login = cls.client.post('/api/v1/auth/login', json={
-            'email': 'admin@example.test',
+            'email': 'keyhub-test-user-741@gmail.com',
             'password': 'Secure-Test-Password-12345'
         })
         assert login.status_code == 200, login.text
