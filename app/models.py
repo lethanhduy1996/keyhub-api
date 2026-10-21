@@ -61,6 +61,29 @@ class Activation(Base):
     key: Mapped[LicenseKey] = relationship(back_populates='devices')
 
 
+class DeviceHeartbeat(Base):
+    """Last successful online verification for an enrolled device.
+
+    Lives in a separate table to avoid altering the existing activations table.
+    """
+    __tablename__ = 'device_heartbeats'
+    key_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    device_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    last_verified_at: Mapped[int] = mapped_column(nullable=False)
+
+
+class DeviceAuditEvent(Base):
+    """Small permanent audit trail of device enrollments and admin actions."""
+    __tablename__ = 'device_audit_events'
+    __table_args__ = (Index('ix_device_event_key_time', 'key_id', 'created_at'),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    key_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    device_code: Mapped[str] = mapped_column(String(24), nullable=False)
+    label: Mapped[str] = mapped_column(String(80), default='', nullable=False)
+    event_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    created_at: Mapped[int] = mapped_column(default=now_ts, nullable=False)
+
+
 class APICredential(Base):
     __tablename__ = 'api_credentials'
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
