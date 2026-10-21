@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -200,6 +200,50 @@ def issue_key(data: IssueKeyIn, admin: User = Depends(admin_user), db: Session =
     db.commit()
     db.refresh(key)
     return KeyIssuedOut(**key_out(key, db).model_dump(), secret=secret)
+
+
+
+def delete_license_rows(db: Session, entries: list[LicenseKey]) -> int:
+    """Permanently remove selected licenses and their child/device metadata."""
+    if not entries:
+        return 0
+    ids = [item.id for item in entries]
+    db.execute(delete(DeviceHeartbeat).where(DeviceHeartbeat.key_id.in_(ids)))
+    db.execute(delete(DeviceAuditEvent).where(DeviceAuditEvent.key_id.in_(ids)))
+    # ORM cascade deletes Activation records before parent license rows.
+    for item in entries:
+        db.delete(item)
+    db.commit()
+    return len(entries)
+
+
+@app.delete('/api/v1/keys/inactive')
+def delete_inactive_keys(confirm: bool = Query(False),
+                         admin: User = Depends(admin_user), db: Session = Depends(get_db)):
+    """Delete at most 500 expired/revoked licenses per confirmed request."""
+    if not confirm:
+        raise HTTPException(400, 'Explicit confirmation required')
+    cutoff = now_ts()
+    predicate = or_(LicenseKey.revoked_at.is_not(None), LicenseKey.expires_at <= cutoff)
+    stmt = select(LicenseKey).where(predicate).order_by(
+        LicenseKey.created_at, LicenseKey.id).limit(500).with_for_update()
+    entries = db.scalars(stmt).all()
+    count = delete_license_rows(db, entries)
+    remaining = db.scalar(select(func.count()).select_from(LicenseKey).where(predicate)) or 0
+    return {'deleted': count, 'remaining': remaining}
+
+
+@app.delete('/api/v1/keys/{key_id}', response_model=MessageOut)
+def delete_inactive_key(key_id: str, admin: User = Depends(admin_user),
+                        db: Session = Depends(get_db)):
+    """Active licenses cannot be permanently deleted."""
+    key = db.scalar(select(LicenseKey).where(LicenseKey.id == key_id).with_for_update())
+    if key is None:
+        raise HTTPException(404, 'License not found')
+    if key.revoked_at is None and key.expires_at > now_ts():
+        raise HTTPException(409, 'Active licenses cannot be deleted; revoke first')
+    delete_license_rows(db, [key])
+    return MessageOut(message='License permanently deleted')
 
 
 @app.post('/api/v1/keys/activate', response_model=KeyOut)

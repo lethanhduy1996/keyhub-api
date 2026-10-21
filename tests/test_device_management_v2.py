@@ -15,7 +15,7 @@ os.environ['ALLOWED_ORIGINS'] = ''
 from fastapi.testclient import TestClient
 from app.db import SessionLocal
 from app.main import app
-from app.models import LicenseKey, User
+from app.models import Activation, DeviceAuditEvent, DeviceHeartbeat, LicenseKey, User
 from app.security import hash_password, new_license, secret_digest, now_ts
 
 
@@ -111,6 +111,85 @@ class DeviceManagementTest(unittest.TestCase):
         self.assertIn('removed', {e['event_type'] for e in history.json()})
         self.assertFalse(self.client.post('/api/v1/keys/verify',
                                           json=payload).json()['valid'])
+
+    def test_admin_can_only_delete_inactive_licenses(self):
+        with SessionLocal() as db:
+            owner = db.scalar(__import__('sqlalchemy').select(User).where(
+                User.email == 'keyhub-test-user-741@gmail.com'))
+            self.assertIsNotNone(owner)
+            specs = [('expired', now_ts()-60, None),
+                     ('revoked', now_ts()+86400, now_ts()-30),
+                     ('active', now_ts()+86400, None)]
+            key_ids = {}
+            for label, expiry, revoked in specs:
+                prefix, secret = new_license()
+                row = LicenseKey(owner_id=owner.id,
+                                 prefix=prefix, key_digest=secret_digest(secret),
+                                 device_limit=1, expires_at=expiry,
+                                 revoked_at=revoked, note=label)
+                db.add(row)
+                db.flush()
+                key_ids[label] = row.id
+                if label == 'revoked':
+                    digest = secret_digest('test-device-identifier-abc')
+                    db.add(Activation(key_id=row.id, device_hash=digest,
+                                      label='test phone'))
+                    db.add(DeviceHeartbeat(key_id=row.id, device_hash=digest,
+                                           last_verified_at=now_ts()))
+                    db.add(DeviceAuditEvent(key_id=row.id,
+                                            device_code='KH-TESTDEVICE-ABCDEF12',
+                                            label='test phone',
+                                            event_type='activated'))
+            db.commit()
+        url = '/api/v1/keys'
+        # Authentication and confirmations enforced on the backend.
+        anonymous = self.client.delete(url+'/inactive?confirm=true')
+        self.assertEqual(anonymous.status_code, 401)
+        not_confirmed = self.client.delete(url+'/inactive', headers=self.headers)
+        self.assertEqual(not_confirmed.status_code, 400)
+        active = self.client.delete(url+'/'+key_ids['active'],
+                                    headers=self.headers)
+        self.assertEqual(active.status_code, 409)
+
+        # Both expired and revoked can be deleted individually.
+        for kind in ('expired','revoked'):
+            deleted = self.client.delete(url+'/'+key_ids[kind], headers=self.headers)
+            self.assertEqual(deleted.status_code, 200, deleted.text)
+            missing = self.client.delete(url+'/'+key_ids[kind],
+                                         headers=self.headers)
+            self.assertEqual(missing.status_code, 404)
+        with SessionLocal() as db:
+            self.assertIsNone(db.get(LicenseKey, key_ids['revoked']))
+            self.assertFalse(db.query(Activation).filter_by(
+                key_id=key_ids['revoked']).count())
+            self.assertFalse(db.query(DeviceHeartbeat).filter_by(
+                key_id=key_ids['revoked']).count())
+            self.assertFalse(db.query(DeviceAuditEvent).filter_by(
+                key_id=key_ids['revoked']).count())
+            self.assertIsNotNone(db.get(LicenseKey, key_ids['active']))
+
+        # Bulk cleanup removes inactive records only; active ones survive.
+        with SessionLocal() as db:
+            owner = db.scalar(__import__('sqlalchemy').select(User).where(
+                User.email == 'keyhub-test-user-741@gmail.com'))
+            for label in ('expired-bulk','revoked-bulk'):
+                prefix, secret = new_license()
+                db.add(LicenseKey(owner_id=owner.id, prefix=prefix,
+                    key_digest=secret_digest(secret), device_limit=1,
+                    expires_at=now_ts()-120 if label.startswith('expired') else now_ts()+86400,
+                    revoked_at=now_ts() if label.startswith('revoked') else None,
+                    note=label))
+            db.commit()
+        cleaned = self.client.delete(url+'/inactive?confirm=true',
+                                     headers=self.headers)
+        self.assertEqual(cleaned.status_code, 200, cleaned.text)
+        self.assertGreaterEqual(cleaned.json()['deleted'], 2)
+        self.assertEqual(cleaned.json()['remaining'], 0)
+        with SessionLocal() as db:
+            self.assertIsNotNone(db.get(LicenseKey, key_ids['active']))
+        cleaned_again=self.client.delete(url+'/inactive?confirm=true',
+                                         headers=self.headers)
+        self.assertEqual(cleaned_again.json()['deleted'], 0)
 
     def test_unauthorized_history_and_rename(self):
         history = self.client.get(f'/api/v1/keys/{self.key_id}/devices/history')
