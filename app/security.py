@@ -58,16 +58,21 @@ def new_refresh_token() -> str:
 
 
 def new_license() -> tuple[str, str]:
+    """Generate branded License Keys; database prefix stays a 12-char lookup ID."""
     prefix = secrets.token_hex(6).upper()
-    secret = 'IKS-' + prefix + '-' + secrets.token_urlsafe(32)
+    secret = 'duyle-' + prefix + '-' + secrets.token_urlsafe(32)
     return prefix, secret
 
 
 def license_prefix(raw: str) -> str | None:
+    """Allow existing IKS licenses alongside newly issued duyle licenses."""
     parts = raw.strip().split('-', 2)
-    if len(parts) != 3 or parts[0] != 'IKS' or len(parts[1]) != 12:
+    if (len(parts) != 3 or parts[0] not in ('IKS', 'duyle')
+            or len(parts[1]) != 12 or not parts[2]):
         return None
-    return parts[1]
+    if not all(ch in '0123456789abcdefABCDEF' for ch in parts[1]):
+        return None
+    return parts[1].upper()
 
 
 def safe_digest_equal(a: str, b: str) -> bool:
