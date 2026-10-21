@@ -67,6 +67,7 @@ class ActivationOut(BaseModel):
     id: str
     label: str
     created_at: int
+    device_code: str = ''  # Human-readable alias, not the Apple UDID
 
 
 class MessageOut(BaseModel):
