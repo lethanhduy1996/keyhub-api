@@ -247,6 +247,31 @@ class DeviceManagementTest(unittest.TestCase):
                                          headers=self.headers)
         self.assertEqual(cleaned_again.json()['deleted'], 0)
 
+    def test_telegram_button_colors_and_labels(self):
+        from app.telegram_bot import (
+            button_style, home_markup, keyboard, prompt_issue,
+        )
+        self.assertEqual(button_style('periods'), 'success')
+        self.assertEqual(button_style('issue:30:1'), 'success')
+        self.assertEqual(button_style('list:active'), 'primary')
+        self.assertEqual(button_style('delete:ABCDEF123456'), 'danger')
+        self.assertEqual(button_style('revoke:ABCDEF123456'), 'danger')
+        self.assertIsNone(button_style('home'))
+
+        buttons = home_markup()['inline_keyboard']
+        self.assertEqual(buttons[0][0]['style'], 'success')
+        self.assertEqual(buttons[0][1]['style'], 'primary')
+        self.assertNotIn('style', buttons[-1][0])
+        for row in buttons:
+            for button in row:
+                self.assertTrue(button['text'])
+                self.assertLessEqual(len(button['callback_data'].encode()), 64)
+        confirmation = prompt_issue(1, 30, 1)['reply_markup']['inline_keyboard']
+        self.assertEqual(confirmation[0][0]['style'], 'success')
+        self.assertNotIn('style', confirmation[1][0])
+        danger = keyboard((('Xóa', 'delete:ABCDEF123456'),))
+        self.assertEqual(danger['inline_keyboard'][0][0]['style'], 'danger')
+
     def test_telegram_bot_authorization_idempotence_and_key_lifecycle(self):
         from unittest.mock import AsyncMock, patch
         from app.config import get_settings
