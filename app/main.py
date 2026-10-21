@@ -70,6 +70,11 @@ def key_out(key: LicenseKey, db: Session) -> KeyOut:
                   is_active=key.revoked_at is None and key.expires_at > now_ts())
 
 
+def device_alias(device_hash: str) -> str:
+    """Pseudonymous administrative identifier; not an Apple hardware UDID."""
+    return f'KH-{device_hash[:8].upper()}-{device_hash[8:16].upper()}'
+
+
 def key_for_secret(raw: str, db: Session, lock: bool = False) -> LicenseKey | None:
     prefix = license_prefix(raw)
     if prefix is None:
@@ -195,7 +200,7 @@ def activate_with_key(data: KeyActionIn, db: Session = Depends(get_db)):
             raise HTTPException(409, 'Device limit reached')
         db.add(Activation(key_id=key.id, device_hash=digest, label=data.label))
         db.commit()
-    return VerifyOut(valid=True)
+    return VerifyOut(valid=True, device_code=device_alias(digest))
 
 
 @app.post('/api/v1/keys/verify', response_model=VerifyOut)
@@ -207,7 +212,8 @@ def verify(data: KeyActionIn, db: Session = Depends(get_db)):
         return VerifyOut(valid=False)
     existing = db.scalar(select(Activation.id).where(
         Activation.key_id == key.id, Activation.device_hash == secret_digest(data.device_id)))
-    return VerifyOut(valid=existing is not None)
+    return VerifyOut(valid=existing is not None,
+                     device_code=device_alias(secret_digest(data.device_id)) if existing is not None else None)
 
 
 @app.get('/api/v1/keys/{key_id}/devices', response_model=list[ActivationOut])
@@ -217,7 +223,8 @@ def list_devices(key_id: str, user: User = Depends(current_user), db: Session = 
         raise HTTPException(404, 'License not found')
     if not user.is_admin and key.owner_id != user.id:
         raise HTTPException(403, 'No access to this license')
-    return [ActivationOut(id=device.id, label=device.label, created_at=device.created_at)
+    return [ActivationOut(id=device.id, label=device.label, created_at=device.created_at,
+                          device_code=device_alias(device.device_hash))
             for device in db.scalars(select(Activation).where(Activation.key_id == key.id)
                                      .order_by(Activation.created_at.desc())).all()]
 
