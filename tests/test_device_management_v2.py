@@ -83,10 +83,13 @@ class DeviceManagementTest(unittest.TestCase):
                                          json=payload)
         self.assertEqual(old_activated.status_code, 200, old_activated.text)
         self.assertTrue(old_activated.json()['valid'])
+        self.assertGreater(old_activated.json()['expires_at'], now_ts())
         old_verified = self.client.post('/api/v1/keys/verify',
                                         json=payload)
         self.assertEqual(old_verified.status_code, 200, old_verified.text)
         self.assertTrue(old_verified.json()['valid'])
+        self.assertEqual(old_verified.json()['expires_at'],
+                         old_activated.json()['expires_at'])
 
         # The string prefix itself participates in the secret digest;
         # changing IKS to duyle cannot validate an older License.
@@ -94,8 +97,9 @@ class DeviceManagementTest(unittest.TestCase):
         not_activated = self.client.post('/api/v1/keys/activate-with-key',
                                          json=tampered)
         self.assertEqual(not_activated.status_code, 400)
-        self.assertFalse(self.client.post('/api/v1/keys/verify',
-                                          json=tampered).json()['valid'])
+        invalid = self.client.post('/api/v1/keys/verify', json=tampered)
+        self.assertFalse(invalid.json()['valid'])
+        self.assertIsNone(invalid.json()['expires_at'])
 
     def test_admin_issue_uses_duyle_prefix(self):
         resp = self.client.post('/api/v1/keys', headers=self.headers, json={
@@ -116,6 +120,7 @@ class DeviceManagementTest(unittest.TestCase):
         activated = self.client.post('/api/v1/keys/activate-with-key', json=payload)
         self.assertEqual(activated.status_code, 200, activated.text)
         self.assertTrue(activated.json()['valid'])
+        self.assertGreater(activated.json()['expires_at'], now_ts())
         code = activated.json()['device_code']
         self.assertTrue(code.startswith('KH-'))
 
@@ -132,6 +137,8 @@ class DeviceManagementTest(unittest.TestCase):
         verified = self.client.post('/api/v1/keys/verify', json=payload)
         self.assertEqual(verified.status_code, 200, verified.text)
         self.assertTrue(verified.json()['valid'])
+        self.assertEqual(verified.json()['expires_at'],
+                         activated.json()['expires_at'])
 
         other = dict(payload, device_id='44444444-4444-4444-4444-444444444444')
         limit = self.client.post('/api/v1/keys/activate-with-key', json=other)
@@ -165,8 +172,9 @@ class DeviceManagementTest(unittest.TestCase):
         history = self.client.get(history_url, headers=self.headers)
         self.assertEqual(len(history.json()), 3)
         self.assertIn('removed', {e['event_type'] for e in history.json()})
-        self.assertFalse(self.client.post('/api/v1/keys/verify',
-                                          json=payload).json()['valid'])
+        denied = self.client.post('/api/v1/keys/verify', json=payload)
+        self.assertFalse(denied.json()['valid'])
+        self.assertIsNone(denied.json()['expires_at'])
 
     def test_admin_can_only_delete_inactive_licenses(self):
         with SessionLocal() as db:
