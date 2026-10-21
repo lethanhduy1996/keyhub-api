@@ -69,6 +69,19 @@ class ActivationOut(BaseModel):
     label: str
     created_at: int
     device_code: str = ''  # Human-readable alias, not the Apple UDID
+    last_verified_at: int | None = None
+
+
+class RenameDeviceIn(BaseModel):
+    label: str = Field(min_length=1, max_length=80)
+
+
+class DeviceEventOut(BaseModel):
+    id: str
+    device_code: str
+    label: str
+    event_type: str
+    created_at: int
 
 
 class MessageOut(BaseModel):
