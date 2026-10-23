@@ -53,6 +53,71 @@ class DeviceManagementTest(unittest.TestCase):
         cls.client_ctx.__exit__(None, None, None)
         TMP.cleanup()
 
+    def test_web_check_and_logout_do_not_consume_or_revoke_ipa_license(self):
+        # A 1-device License must remain free for the IPA after web check.
+        with SessionLocal() as db:
+            owner = db.scalar(__import__('sqlalchemy').select(User).where(
+                User.email == 'keyhub-test-user-741@gmail.com'))
+            prefix, license_secret = new_license()
+            license_row = LicenseKey(
+                owner_id=owner.id, prefix=prefix,
+                key_digest=secret_digest(license_secret),
+                device_limit=1, expires_at=now_ts() + 86400,
+                note='Web versus IPA isolation')
+            db.add(license_row)
+            db.commit()
+            license_id = license_row.id
+
+        check_url = '/api/v1/keys/check'
+        web_checked = self.client.post(check_url, headers=self.headers,
+                                       json={'key': license_secret})
+        self.assertEqual(web_checked.status_code, 200, web_checked.text)
+        self.assertTrue(web_checked.json()['valid'])
+        self.assertGreater(web_checked.json()['expires_at'], now_ts())
+        self.assertIsNone(web_checked.json()['device_code'])
+        self.assertEqual(self.client.post(check_url, headers=self.headers,
+                          json={'key': license_secret + '-tampered'}).json()['valid'], False)
+        self.assertEqual(self.client.post(check_url,
+                         json={'key': license_secret}).status_code, 401)
+        with SessionLocal() as db:
+            self.assertEqual(db.query(Activation).filter_by(key_id=license_id).count(), 0)
+            self.assertEqual(db.query(DeviceHeartbeat).filter_by(key_id=license_id).count(), 0)
+
+        web_login = self.client.post('/api/v1/auth/login', json={
+            'email': 'keyhub-test-user-741@gmail.com',
+            'password': 'Secure-Test-Password-12345'
+        })
+        self.assertEqual(web_login.status_code, 200, web_login.text)
+        token = web_login.json()
+        logged_out = self.client.post('/api/v1/auth/logout', headers={
+            'Authorization': 'Bearer ' + token['access_token'],
+        }, json={'refresh_token': token['refresh_token']})
+        self.assertEqual(logged_out.status_code, 200, logged_out.text)
+        failed_refresh = self.client.post('/api/v1/auth/refresh', json={
+            'refresh_token': token['refresh_token']
+        })
+        self.assertEqual(failed_refresh.status_code, 401)
+
+        ipa_payload = {'key': license_secret,
+                       'device_id': '1D7F1709-2B46-476F-9FEE-017D19E9F8ED',
+                       'label': 'iPhone / IPA'}
+        activated = self.client.post('/api/v1/keys/activate-with-key',
+                                     json=ipa_payload)
+        self.assertEqual(activated.status_code, 200, activated.text)
+        self.assertTrue(activated.json()['valid'])
+        verified = self.client.post('/api/v1/keys/verify', json=ipa_payload)
+        self.assertEqual(verified.status_code, 200, verified.text)
+        self.assertTrue(verified.json()['valid'])
+        self.assertEqual(verified.json()['expires_at'], activated.json()['expires_at'])
+
+        other = dict(ipa_payload, device_id='994C7A48-02FC-4EBE-B8A2-90A007198A68')
+        denied = self.client.post('/api/v1/keys/activate-with-key', json=other)
+        self.assertEqual(denied.status_code, 409)
+        with SessionLocal() as db:
+            activations = db.query(Activation).filter_by(key_id=license_id).all()
+            self.assertEqual(len(activations), 1)
+            self.assertEqual(activations[0].label, 'iPhone / IPA')
+
     def test_duyle_prefix_and_existing_iks_keys_both_work(self):
         import secrets
 
