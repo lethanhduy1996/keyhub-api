@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import get_db, init_db
 from .models import Activation, APICredential, DeviceAuditEvent, DeviceHeartbeat, LicenseKey, RefreshSession, User
-from .schemas import (ActivationOut, DeviceEventOut, RenameDeviceIn, APICredentialOut, APICredentialIssuedOut, CreateAPICredentialIn, IssueKeyIn, KeyActionIn, KeyIssuedOut,
+from .schemas import (ActivationOut, DeviceEventOut, RenameDeviceIn, APICredentialOut, APICredentialIssuedOut, CreateAPICredentialIn, CheckLicenseIn, IssueKeyIn, KeyActionIn, KeyIssuedOut,
                       KeyOut, LoginIn, MessageOut, RefreshIn, RegisterIn,
                       TokensOut, UserOut, VerifyOut)
 from .telegram_bot import register_webhook, router as telegram_router
@@ -247,6 +247,22 @@ def delete_inactive_key(key_id: str, admin: User = Depends(admin_user),
         raise HTTPException(409, 'Active licenses cannot be deleted; revoke first')
     delete_license_rows(db, [key])
     return MessageOut(message='License permanently deleted')
+
+
+@app.post('/api/v1/keys/check', response_model=VerifyOut)
+def check_license(data: CheckLicenseIn, user: User = Depends(current_user),
+                  db: Session = Depends(get_db)):
+    """Check a License from the website without registering a browser device.
+
+    Web login/refresh/logout sessions are independent of iOS device licenses.
+    A web browser is not a trustworthy iOS device identity and should never
+    consume the device_limit slot reserved for the signed IPA.
+    """
+    key = key_for_secret(data.key, db)
+    if (key is None or key.owner_id != user.id or key.revoked_at is not None
+            or key.expires_at <= now_ts() or not key.owner.is_active):
+        return VerifyOut(valid=False)
+    return VerifyOut(valid=True, expires_at=key.expires_at)
 
 
 @app.post('/api/v1/keys/activate', response_model=KeyOut)
