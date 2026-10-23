@@ -59,6 +59,11 @@ class KeyActionIn(BaseModel):
     label: str = Field(default='', max_length=80)
 
 
+class CheckLicenseIn(BaseModel):
+    """Authenticated web check; intentionally does not enroll a device."""
+    key: str = Field(min_length=30, max_length=200)
+
+
 class VerifyOut(BaseModel):
     valid: bool
     device_code: str | None = None  # Stable app identifier, not hardware UDID
